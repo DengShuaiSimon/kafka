@@ -45,13 +45,18 @@ import scala.jdk.CollectionConverters._
  *
  * Noted that if you add a future delayed operation that calls ReplicaManager.appendRecords() in onComplete()
  * like DelayedJoin, you must be aware that this operation's onExpiration() needs to call actionQueue.tryCompleteAction().
+ * DelayedOperation 类是一个抽象类，它的构造函数中只需要传入一个超时时间即可。
+ * 这个超时时间通常是客户端发出请求的超时时间，也就是客户端参数 request.timeout.ms 的值。
+ * 这个类实现了上节课学到的 TimerTask 接口，因此，作为一个建模延迟操作的类，它自动继承了 TimerTask 接口的 cancel 方法，
+ * 支持延迟操作的取消，以及 TimerTaskEntry 的 Getter 和 Setter 方法，支持将延迟操作绑定到时间轮相应 Bucket 下的某个链表元素上。
  */
 abstract class DelayedOperation(override val delayMs: Long,
                                 lockOpt: Option[Lock] = None)
   extends TimerTask with Logging {
-
+  // 标识该延迟操作是否已经完成
   private val completed = new AtomicBoolean(false)
   // Visible for testing
+  // 防止多个线程同时检查操作是否可完成时发生锁竞争导致操作最终超时
   private[server] val lock: Lock = lockOpt.getOrElse(new ReentrantLock)
 
   /*
@@ -66,6 +71,7 @@ abstract class DelayedOperation(override val delayMs: Long,
    * the first thread will succeed in completing the operation and return
    * true, others will still return false
    */
+  //强制完成延迟操作，不管它是否满足完成条件。每当操作满足完成条件或已经过期了，就需要调用该方法完成该操作。
   def forceComplete(): Boolean = {
     if (completed.compareAndSet(false, true)) {
       // cancel the timeout timer
@@ -79,17 +85,20 @@ abstract class DelayedOperation(override val delayMs: Long,
 
   /**
    * Check if the delayed operation is already completed
+   * 检查延迟操作是否已经完成。源码使用这个方法来决定后续如何处理该操作。比如如果操作已经完成了，那么通常需要取消该操作。
    */
   def isCompleted: Boolean = completed.get()
 
   /**
    * Call-back to execute when a delayed operation gets expired and hence forced to complete.
+   * 强制完成之后执行的过期逻辑回调方法。只有真正完成操作的那个线程才有资格调用这个方法。
    */
   def onExpiration(): Unit
 
   /**
    * Process for completing an operation; This function needs to be defined
    * in subclasses and will be called exactly once in forceComplete()
+   * 完成延迟操作所需的处理逻辑。这个方法只会在 forceComplete 方法中被调用。
    */
   def onComplete(): Unit
 
@@ -99,6 +108,7 @@ abstract class DelayedOperation(override val delayMs: Long,
    * forceComplete() and return true iff forceComplete returns true; otherwise return false
    *
    * This function needs to be defined in subclasses
+   * 尝试完成延迟操作的顶层方法，内部会调用 forceComplete 方法。
    */
   def tryComplete(): Boolean
 
@@ -118,11 +128,13 @@ abstract class DelayedOperation(override val delayMs: Long,
 
   /**
    * Thread-safe variant of tryComplete()
+   * 线程安全版本的 tryComplete 方法。这个方法其实是社区后来才加入的，不过已经慢慢地取代了 tryComplete，现在外部代码调用的都是这个方法了。
    */
   private[server] def safeTryComplete(): Boolean = inLock(lock)(tryComplete())
 
   /*
    * run() method defines a task that is executed on timeout
+   * 线程安全版本的 tryComplete 方法。这个方法其实是社区后来才加入的，不过已经慢慢地取代了 tryComplete，现在外部代码调用的都是这个方法了。
    */
   override def run(): Unit = {
     if (forceComplete())
@@ -147,6 +159,16 @@ object DelayedOperationPurgatory {
 
 /**
  * A helper purgatory class for bookkeeping delayed operations with a timeout, and expiring timed out operations.
+ * purgeInterval 这个参数用于控制删除线程移除 Bucket 中的过期延迟请求的频率，在绝大部分情况下，都是 1 秒一次。
+ *      当然，对于生产者、消费者以及删除消息的 AdminClient 而言，Kafka 分别定义了专属的参数允许你调整这个频率。
+ *      比如，生产者参数 producer.purgatory.purge.interval.requests，就是做这个用的。
+ * 需要传入的参数一般只有两个：purgatoryName 和 brokerId，它们分别表示这个 Purgatory 的名字和 Broker 的序号。
+ *
+ * 到了purgeInterval这个清除间隔的数量，就会清理watcherLists中已经完成但是一直被监听的触发器个数，
+ * 而且这个purged 就是已经完成但是还未清理的任务数量。purgeCompleted 进行remove。
+ *
+ * 核心就是一边往时间轮里面加任务，一边在外部死循环调用delayQueue.poll(timeout)方法来触发时间轮的tick，推进时间轮往前走。
+ * 感觉还是Netty实现的时间轮简单点，bucket可以复用，不过netty是自己实现的时间轮推进。
  */
 final class DelayedOperationPurgatory[T <: DelayedOperation](purgatoryName: String,
                                                              timeoutTimer: Timer,
@@ -202,6 +224,9 @@ final class DelayedOperationPurgatory[T <: DelayedOperation](purgatoryName: Stri
    * @param operation the delayed operation to be checked
    * @param watchKeys keys for bookkeeping the operation
    * @return true iff the delayed operations can be completed by the caller
+   * 先尝试完成请求，如果无法完成，则把它加入到 WatcherList 中进行监控。
+   * 具体来说，tryCompleteElseWatch 调用 tryComplete 方法，尝试完成延迟请求，如果返回结果是 true，
+   * 就说明执行 tryCompleteElseWatch 方法的线程正常地完成了该延迟请求，也就不需要再添加到 WatcherList 了，直接返回 true 就行了。
    */
   def tryCompleteElseWatch(operation: T, watchKeys: Seq[Any]): Boolean = {
     assert(watchKeys.nonEmpty, "The watch key list can't be empty")
@@ -235,11 +260,13 @@ final class DelayedOperationPurgatory[T <: DelayedOperation](purgatoryName: Stri
     // any exclusive lock. Since DelayedOperationPurgatory.checkAndComplete() completes delayed operations asynchronously,
     // holding a exclusive lock to make the call is often unnecessary.
     if (operation.safeTryCompleteOrElse {
+      // 遍历所有要监控的Key
       watchKeys.foreach(key => watchForOperation(key, operation))
       if (watchKeys.nonEmpty) estimatedTotalOperations.incrementAndGet()
     }) return true
 
     // if it cannot be completed by now and hence is watched, add to the expire queue also
+    // 如果依然不能完成此请求，将其加入到过期队列
     if (!operation.isCompleted) {
       if (timerEnabled)
         timeoutTimer.add(operation)
@@ -259,12 +286,15 @@ final class DelayedOperationPurgatory[T <: DelayedOperation](purgatoryName: Stri
    * @return the number of completed operations during this process
    */
   def checkAndComplete(key: Any): Int = {
+    // 获取给定Key的WatcherList
     val wl = watcherList(key)
+    // 获取WatcherList中Key对应的Watchers对象实例
     val watchers = inLock(wl.watchersLock) { wl.watchersByKey.get(key) }
+    // 尝试完成满足完成条件的延迟请求并返回成功完成的请求数
     val numCompleted = if (watchers == null)
       0
     else
-      watchers.tryCompleteWatched()
+      watchers.tryCompleteWatched() //非常重要的步骤，去尝试完成那些已满足完成条件的延迟请求。
     if (numCompleted > 0) {
       debug(s"Request key $key unblocked $numCompleted $purgatoryName operations")
     }
@@ -347,6 +377,12 @@ final class DelayedOperationPurgatory[T <: DelayedOperation](purgatoryName: Stri
 
   /**
    * A linked list of watched delayed operations based on some key
+   * Watchers 是基于 Key 的一个延迟请求的监控链表。
+   * 每个 Watchers 实例都定义了一个延迟请求链表，而这里的 Key 可以是任何类型，比如表示消费者组的字符串类型、表示主题分区的 TopicPartitionOperationKey 类型。
+   * 不用穷尽这里所有的 Key 类型，Watchers 是一个通用的延迟请求链表，就行了。Kafka 利用它来监控保存其中的延迟请求的可完成状态。
+   * 既然 Watchers 主要的数据结构是链表，那么，它的所有方法本质上就是一个链表操作。
+   * 比如，tryCompleteWatched 方法会遍历整个链表，并尝试完成其中的延迟请求。
+   * 再比如，cancel 方法也是遍历链表，再取消掉里面的延迟请求。至于 watch 方法，则是将延迟请求加入到链表中。
    */
   private class Watchers(val key: Any) {
     private[this] val operations = new ConcurrentLinkedQueue[T]()
