@@ -51,19 +51,20 @@ import scala.math._
 /**
  * Abstract class for fetching data from multiple partitions from the same broker.
  */
-abstract class AbstractFetcherThread(name: String,
-                                     clientId: String,
-                                     val leader: LeaderEndPoint,
-                                     failedPartitions: FailedPartitions,
+abstract class AbstractFetcherThread(name: String, // 线程名称
+                                     clientId: String, // Client Id，用于日志输出
+                                     val leader: LeaderEndPoint, // 数据源Broker地址，因为它决定 Follower 副本从哪个 Broker 拉取数据，也就是 Leader 副本所在的 Broker 是哪台。
+                                     failedPartitions: FailedPartitions, // 处理过程中出现失败的分区
                                      val fetchTierStateMachine: TierStateMachine,
-                                     fetchBackOffMs: Int = 0,
-                                     isInterruptible: Boolean = true,
-                                     val brokerTopicStats: BrokerTopicStats) //BrokerTopicStats's lifecycle managed by ReplicaManager
+                                     fetchBackOffMs: Int = 0, // 获取操作重试间隔
+                                     isInterruptible: Boolean = true, // 线程是否允许被中断
+                                     val brokerTopicStats: BrokerTopicStats) //Broker 端主题的各类监控指标，常见的有 MessagesInPerSec、BytesInPerSec 等。BrokerTopicStats's lifecycle managed by ReplicaManager
   extends ShutdownableThread(name, isInterruptible) with Logging {
 
   this.logIdent = this.logPrefix
-
+  // 定义FetchData类型表示获取的消息数据
   type FetchData = FetchResponseData.PartitionData
+  // 定义EpochData类型表示Leader Epoch数据
   type EpochData = OffsetForLeaderEpochRequestData.OffsetForLeaderPartition
 
   private val partitionStates = new PartitionStates[PartitionFetchState]
