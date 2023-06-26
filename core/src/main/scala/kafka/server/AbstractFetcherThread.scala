@@ -923,10 +923,14 @@ case class ClientIdTopicPartition(clientId: String, topicPartition: TopicPartiti
   override def toString: String = s"$clientId-$topicPartition"
 }
 
+/**
+ * 可见，副本读取状态有截断中和获取中两个：当副本执行截断操作时，副本状态被设置成 Truncating；
+ * 当副本被读取时，副本状态被设置成 Fetching。
+ */
 sealed trait ReplicaState
-
+// 截断中
 case object Truncating extends ReplicaState
-
+// 获取中
 case object Fetching extends ReplicaState
 
 object PartitionFetchState {
@@ -943,6 +947,9 @@ object PartitionFetchState {
  * (1) Truncating its log, for example having recently become a follower
  * (2) Delayed, for example due to an error, where we subsequently back off a bit
  * (3) ReadyForFetch, the is the active state where the thread is actively fetching data.
+ * 而分区读取状态有 3 个，分别是：可获取，表明副本获取线程当前能够读取数据。
+ * * 被推迟，表明副本获取线程获取数据时出现错误，需要等待一段时间后重试。
+ * * 截断中，表明分区副本正在执行截断操作（比如该副本刚刚成为 Follower 副本）。
  */
 case class PartitionFetchState(topicId: Option[Uuid],
                                fetchOffset: Long,
@@ -951,13 +958,13 @@ case class PartitionFetchState(topicId: Option[Uuid],
                                delay: Option[DelayedItem],
                                state: ReplicaState,
                                lastFetchedEpoch: Option[Int]) {
-
+  // 分区可获取的条件是副本处于Fetching且未被推迟执行
   def isReadyForFetch: Boolean = state == Fetching && !isDelayed
-
+  // 副本处于ISR的条件：没有lag
   def isReplicaInSync: Boolean = lag.isDefined && lag.get <= 0
-
+  // 分区处于截断中状态的条件：副本处于Truncating状态且未被推迟执行
   def isTruncating: Boolean = state == Truncating && !isDelayed
-
+  // 分区被推迟获取数据的条件：存在未过期的延迟任务
   def isDelayed: Boolean = delay.exists(_.getDelay(TimeUnit.MILLISECONDS) > 0)
 
   override def toString: String = {
