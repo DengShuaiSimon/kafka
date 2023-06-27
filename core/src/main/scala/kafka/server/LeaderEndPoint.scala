@@ -111,6 +111,9 @@ trait LeaderEndPoint {
    * @param partitions A map of topic partitions to their respective partition fetch state
    *
    * @return A ResultWithPartitions, used to create the fetchRequest for fetch.
+   * 一组要读取的分区列表
+   * 分区是否可读取取决于PartitionFetchState中的状态
+   * 封装FetchRequest.Builder对象
    */
   def buildFetch(partitions: Map[TopicPartition, PartitionFetchState]): ResultWithPartitions[Option[ReplicaFetch]]
 

@@ -78,12 +78,15 @@ abstract class AbstractFetcherThread(name: String, // 线程名称
   /* callbacks to be defined in subclass */
 
   // process fetched data
-  protected def processPartitionData(topicPartition: TopicPartition,
-                                     fetchOffset: Long,
-                                     partitionData: FetchData): Option[LogAppendInfo]
+  // 用于处理读取回来的消息集合
+  protected def processPartitionData(topicPartition: TopicPartition, // 读取哪个分区的数据
+                                     fetchOffset: Long, // 读取到的最新位移值
+                                     partitionData: FetchData): Option[LogAppendInfo] // 读取到的分区消息数据
 
   protected def truncate(topicPartition: TopicPartition, truncationState: OffsetTruncationState): Unit
 
+  //topicPartition：要对哪个分区下副本执行截断操作
+  // Offset
   protected def truncateFullyAndStartAt(topicPartition: TopicPartition, offset: Long): Unit
 
   protected def latestEpoch(topicPartition: TopicPartition): Option[Int]
@@ -108,6 +111,7 @@ abstract class AbstractFetcherThread(name: String, // 线程名称
     fetcherLagStats.unregister()
   }
 
+  //是 AbstractFetcherThread 类的核心方法
   override def doWork(): Unit = {
     maybeTruncate()
     maybeFetch()
@@ -133,6 +137,7 @@ abstract class AbstractFetcherThread(name: String, // 线程名称
   }
 
   // deal with partitions with errors, potentially due to leadership changes
+  //handlePartitionsWithErrors方法简单来说就是，如果可能出现leader切换，延迟处理带错误的partitions，并且延迟处理过程加了中断优先处理的锁
   private def handlePartitionsWithErrors(partitions: Iterable[TopicPartition], methodName: String): Unit = {
     if (partitions.nonEmpty) {
       debug(s"Handling errors in $methodName for partitions $partitions")
