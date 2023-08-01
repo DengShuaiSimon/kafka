@@ -71,6 +71,7 @@ import scala.jdk.CollectionConverters._
 
 /*
  * Result metadata of a log append operation on the log
+ * LogAppendResult：表示副本管理器执行副本日志写入操作后返回的结果信息。
  */
 case class LogAppendResult(info: LogAppendInfo, exception: Option[Throwable] = None) {
   def error: Errors = exception match {
@@ -78,7 +79,7 @@ case class LogAppendResult(info: LogAppendInfo, exception: Option[Throwable] = N
     case Some(e) => Errors.forException(e)
   }
 }
-
+// LogDeleteRecordsResult：表示副本管理器执行副本日志删除操作后返回的结果信息。
 case class LogDeleteRecordsResult(requestedOffset: Long, lowWatermark: Long, exception: Option[Throwable] = None) {
   def error: Errors = exception match {
     case None => Errors.NONE
@@ -99,6 +100,7 @@ case class LogDeleteRecordsResult(requestedOffset: Long, lowWatermark: Long, exc
  * @param lastStableOffset Current LSO or None if the result has an exception
  * @param preferredReadReplica the preferred read replica to be used for future fetches
  * @param exception Exception if error encountered while reading from the log
+ *  LogReadResult:表示副本管理器从副本本地日志中读取到的消息数据以及相关元数据信息，如高水位值、Log Start Offset 值等。
  */
 case class LogReadResult(info: FetchDataInfo,
                          divergingEpoch: Option[FetchResponseData.EpochEndOffset],
@@ -154,7 +156,8 @@ case class LogReadResult(info: FetchDataInfo,
  * or follower of a partition.
  */
 sealed trait HostedPartition
-
+// HostedPartition 及其实现对象：表示 Broker 本地保存的分区对象的状态。
+// 可能的状态包括：不存在状态（None）、在线状态（Online）和离线状态（Offline）。
 object HostedPartition {
   /**
    * This broker does not have any state for this partition locally.
@@ -176,22 +179,30 @@ object ReplicaManager {
   val HighWatermarkFilename = "replication-offset-checkpoint"
 }
 
-class ReplicaManager(val config: KafkaConfig,
-                     metrics: Metrics,
-                     time: Time,
-                     scheduler: Scheduler,
-                     val logManager: LogManager,
+// ReplicaManager 类：它是副本管理器的具体实现代码，里面定义了读写副本、删除副本消息的方法以及其他管理方法。
+class ReplicaManager(val config: KafkaConfig,// 配置管理类
+                     metrics: Metrics,// 监控指标类
+                     time: Time,// 定时器类
+                     scheduler: Scheduler,// Kafka调度器
+                     val logManager: LogManager,//这是日志管理器。它负责创建和管理分区的日志对象，里面定义了很多操作日志对象的方法，如 getOrCreateLog 等。
                      val remoteLogManager: Option[RemoteLogManager] = None,
-                     quotaManagers: QuotaManagers,
-                     val metadataCache: MetadataCache,
+                     quotaManagers: QuotaManagers,// 配额管理器
+                     val metadataCache: MetadataCache,// Broker元数据缓存,这是 Broker 端的元数据缓存，保存集群上分区的 Leader、ISR 等信息。注意，它和我们之前说的 Controller 端元数据缓存是有联系的。每台 Broker 上的元数据缓存，是从 Controller 端的元数据缓存异步同步过来的。
+                     // 这是失效日志路径的处理器类。Kafka 1.1 版本新增了对于 JBOD 的支持。这也就是说，Broker 如果配置了多个日志路径，当某个日志路径不可用之后（比如该路径所在的磁盘已满），Broker 能够继续工作。
+                     // 那么，这就需要一整套机制来保证，在出现磁盘 I/O 故障时，Broker 的正常磁盘下的副本能够正常提供服务。
+                     // 其中，logDirFailureChannel 是暂存失效日志路径的管理器类。该功能算是 Kafka 提升服务器端高可用性的一个改进。有了它之后，即使 Broker 上的单块磁盘坏掉了，整个 Broker 的服务也不会中断。
                      logDirFailureChannel: LogDirFailureChannel,
                      val alterPartitionManager: AlterPartitionManager,
                      val brokerTopicStats: BrokerTopicStats = new BrokerTopicStats(),
                      val isShuttingDown: AtomicBoolean = new AtomicBoolean(false),
                      val zkClient: Option[KafkaZkClient] = None,
+                     // 处理延时PRODUCE请求的Purgatory
                      delayedProducePurgatoryParam: Option[DelayedOperationPurgatory[DelayedProduce]] = None,
+                     // 处理延时FETCH请求的Purgatory
                      delayedFetchPurgatoryParam: Option[DelayedOperationPurgatory[DelayedFetch]] = None,
+                     // 处理延时DELETE_RECORDS请求的Purgatory
                      delayedDeleteRecordsPurgatoryParam: Option[DelayedOperationPurgatory[DelayedDeleteRecords]] = None,
+                     // 处理延时ELECT_LEADERS请求的Purgatory
                      delayedElectLeaderPurgatoryParam: Option[DelayedOperationPurgatory[DelayedElectLeader]] = None,
                      threadNamePrefix: Option[String] = None,
                      brokerEpochSupplier: () => Long = () => -1
