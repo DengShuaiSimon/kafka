@@ -149,6 +149,8 @@ class UnifiedLog(@volatile var logStartOffset: Long,
 
   def localLogStartOffset(): Long = _localLogStartOffset
 
+  @volatile private var highestOffsetInRemoteStorage: Long = -1L
+
   locally {
     initializePartitionMetadata()
     updateLogStartOffset(logStartOffset)
@@ -521,6 +523,11 @@ class UnifiedLog(@volatile var logStartOffset: Long,
       localLog.updateRecoveryPoint(offset)
     }
   }
+  def updateHighestOffsetInRemoteStorage(offset: Long): Unit = {
+    if (!remoteLogEnabled())
+      warn(s"Unable to update the highest offset in remote storage with offset $offset since remote storage is not enabled. The existing highest offset is $highestOffsetInRemoteStorage.")
+    else if (offset > highestOffsetInRemoteStorage) highestOffsetInRemoteStorage = offset
+  }
 
   // Rebuild producer state until lastOffset. This method may be called from the recovery code path, and thus must be
   // free of all side-effects, i.e. it must not update any log-specific state.
@@ -571,6 +578,11 @@ class UnifiedLog(@volatile var logStartOffset: Long,
       result.put(producerId.toLong, lastRecord)
     }
     result
+  }
+
+  def hasOngoingTransaction(producerId: Long): Boolean = lock synchronized {
+    val entry = producerStateManager.activeProducers.get(producerId)
+    entry != null && entry.currentTxnFirstOffset.isPresent
   }
 
   /**
@@ -1260,10 +1272,10 @@ class UnifiedLog(@volatile var logStartOffset: Long,
           }
 
           remoteLogManager.get.findOffsetByTimestamp(topicPartition, targetTimestamp, logStartOffset, leaderEpochCache.get)
-        } else None
+        } else Optional.empty()
 
-        if (remoteOffset.nonEmpty) {
-          remoteOffset
+        if (remoteOffset.isPresent) {
+          remoteOffset.asScala
         } else {
           // If it is not found in remote storage, search in the local storage starting with local log start offset.
 

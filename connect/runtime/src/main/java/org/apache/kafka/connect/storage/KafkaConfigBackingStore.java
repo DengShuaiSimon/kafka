@@ -79,6 +79,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.function.Supplier;
 
+import static org.apache.kafka.connect.runtime.TargetState.PAUSED;
+import static org.apache.kafka.connect.runtime.TargetState.STOPPED;
 import static org.apache.kafka.connect.util.ConnectUtils.className;
 
 /**
@@ -239,6 +241,10 @@ public class KafkaConfigBackingStore implements ConfigBackingStore {
             .build();
     public static final Schema TARGET_STATE_V0 = SchemaBuilder.struct()
             .field("state", Schema.STRING_SCHEMA)
+            .build();
+    public static final Schema TARGET_STATE_V1 = SchemaBuilder.struct()
+            .field("state", Schema.STRING_SCHEMA)
+            .field("state.v2", Schema.OPTIONAL_STRING_SCHEMA)
             .build();
     public static final Schema TASK_COUNT_RECORD_V0 = SchemaBuilder.struct()
             .field("task-count", Schema.INT32_SCHEMA)
@@ -633,12 +639,14 @@ public class KafkaConfigBackingStore implements ConfigBackingStore {
      */
     @Override
     public void putTargetState(String connector, TargetState state) {
-        Struct connectTargetState = new Struct(TARGET_STATE_V0);
-        connectTargetState.put("state", state.name());
-        byte[] serializedTargetState = converter.fromConnectData(topic, TARGET_STATE_V0, connectTargetState);
+        Struct connectTargetState = new Struct(TARGET_STATE_V1);
+        // Older workers don't support the STOPPED state; fall back on PAUSED
+        connectTargetState.put("state", state == STOPPED ? PAUSED.name() : state.name());
+        connectTargetState.put("state.v2", state.name());
+        byte[] serializedTargetState = converter.fromConnectData(topic, TARGET_STATE_V1, connectTargetState);
         log.debug("Writing target state {} for connector {}", state, connector);
         try {
-            configLog.send(TARGET_STATE_KEY(connector), serializedTargetState).get(READ_WRITE_TOTAL_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+            configLog.sendWithReceipt(TARGET_STATE_KEY(connector), serializedTargetState).get(READ_WRITE_TOTAL_TIMEOUT_MS, TimeUnit.MILLISECONDS);
         } catch (InterruptedException | ExecutionException | TimeoutException e) {
             log.error("Failed to write target state to Kafka", e);
             throw new ConnectException("Error writing target state to Kafka", e);
@@ -790,7 +798,7 @@ public class KafkaConfigBackingStore implements ConfigBackingStore {
         if (!usesFencableWriter) {
             List<Future<RecordMetadata>> producerFutures = new ArrayList<>();
             keyValues.forEach(
-                    keyValue -> producerFutures.add(configLog.send(keyValue.key, keyValue.value))
+                    keyValue -> producerFutures.add(configLog.sendWithReceipt(keyValue.key, keyValue.value))
             );
 
             timer.update();
@@ -928,11 +936,22 @@ public class KafkaConfigBackingStore implements ConfigBackingStore {
                     return;
                 }
                 @SuppressWarnings("unchecked")
-                Object targetState = ((Map<String, Object>) value.value()).get("state");
-                if (!(targetState instanceof String)) {
-                    log.error("Invalid data for target state for connector '{}': 'state' field should be a String but is {}",
+                Map<String, Object> valueMap = (Map<String, Object>) value.value();
+                Object targetState = valueMap.get("state.v2");
+                if (targetState != null && !(targetState instanceof String)) {
+                    log.error("Invalid data for target state for connector '{}': 'state.v2' field should be a String but is {}",
                             connectorName, className(targetState));
-                    return;
+                    // We don't return here; it's still possible that there's a value we can use in the older state field
+                    targetState = null;
+                }
+                if (targetState == null) {
+                    // This record may have been written by an older worker; fall back on the older state field
+                    targetState = valueMap.get("state");
+                    if (!(targetState instanceof String)) {
+                        log.error("Invalid data for target state for connector '{}': 'state' field should be a String but is {}",
+                                connectorName, className(targetState));
+                        return;
+                    }
                 }
 
                 try {
