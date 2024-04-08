@@ -36,6 +36,8 @@ class ReplicaFetcherManager(brokerConfig: KafkaConfig,
         clientId = "Replica",
         numFetchers = brokerConfig.numReplicaFetchers) {
 
+  // 该方法的主要目的是创建 ReplicaFetcherThread 实例，供 Follower 副本使用。 线程的名字是根据 fetcherId 和 Broker ID 来确定的。
+  // ReplicaManager 类利用 replicaFetcherManager 字段，对所有 Fetcher 线程进行管理，包括线程的创建、启动、添加、停止和移除。
   override def createFetcherThread(fetcherId: Int, sourceBroker: BrokerEndPoint): ReplicaFetcherThread = {
     val prefix = threadNamePrefix.map(tp => s"$tp:").getOrElse("")
     val threadName = s"${prefix}ReplicaFetcherThread-$fetcherId-${sourceBroker.id}"
@@ -46,6 +48,7 @@ class ReplicaFetcherManager(brokerConfig: KafkaConfig,
     val fetchSessionHandler = new FetchSessionHandler(logContext, sourceBroker.id)
     val leader = new RemoteLeaderEndPoint(logContext.logPrefix, endpoint, fetchSessionHandler, brokerConfig,
       replicaManager, quotaManager, metadataVersionSupplier, brokerEpochSupplier)
+    // 创建ReplicaFetcherThread线程实例并返回
     new ReplicaFetcherThread(threadName, leader, brokerConfig, failedPartitions, replicaManager,
       quotaManager, logContext.logPrefix, metadataVersionSupplier)
   }

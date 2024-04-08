@@ -228,12 +228,21 @@ class ReplicaManager(val config: KafkaConfig,// 配置管理类
       purgatoryName = "ElectLeader", brokerId = config.brokerId))
 
   /* epoch of the controller that last changed the leader */
+  // 这个字段的作用是隔离过期 Controller 发送的请求，该字段表示最新一次变更分区 Leader 的 Controller 的 Epoch 值，其默认值为 0。Controller 每发生一次变更，该字段值都会 +1。
+  // 在 ReplicaManager 的代码中，很多地方都会用到它来判断 Controller 发送过来的控制类请求是否合法。如果请求中携带的 controllerEpoch 值小于该字段值，
+  // 就说明这个请求是由一个老的 Controller 发出的，因此，ReplicaManager 直接拒绝该请求的处理。
+  // 它是一个 var 类型，它的值是能够动态修改的：【becomeLeaderOrFollower方法、stopReplicas方法、maybeUpdateMetadataCache方法】
+  // Broker 上接收的所有请求都是由 Kafka I/O 线程处理的，而 I/O 线程可能有多个，因此，这里的 controllerEpoch 字段被声明为 volatile 型，以保证其内存可见性。
   @volatile private[server] var controllerEpoch: Int = KafkaController.InitialControllerEpoch
   protected val localBrokerId = config.brokerId
+  // Kafka 没有所谓的分区管理器，ReplicaManager 类承担了一部分分区管理的工作。
+  // 这里的 allPartitions，就承载了 Broker 上保存的所有分区对象数据。
   protected val allPartitions = new Pool[TopicPartition, HostedPartition](
     valueFactory = Some(tp => HostedPartition.Online(Partition(tp, time, this)))
   )
   protected val replicaStateChangeLock = new Object
+  // 它的主要任务是创建 ReplicaFetcherThread 类实例
+  // ReplicaFetcherThread 类的源码，它的主要职责是帮助 Follower 副本向 Leader 副本拉取消息，并写入到本地日志中。
   val replicaFetcherManager = createReplicaFetcherManager(metrics, time, threadNamePrefix, quotaManagers.follower)
   private[server] val replicaAlterLogDirsManager = createReplicaAlterLogDirsManager(quotaManagers.alterLogDirs, brokerTopicStats)
   private val highWatermarkCheckPointThreadStarted = new AtomicBoolean(false)
