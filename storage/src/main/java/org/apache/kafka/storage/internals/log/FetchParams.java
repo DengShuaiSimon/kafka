@@ -24,9 +24,16 @@ import java.util.Optional;
 
 public class FetchParams {
     public final short requestVersion;
+    /**
+     * 副本 ID。对于消费者而言，该参数值是 -1；对于 Follower 副本而言，该值就是 Follower 副本所在的 Broker ID。
+     */
     public final int replicaId;
     public final long replicaEpoch;
     public final long maxWaitMs;
+    /**
+     * 能够获取的最小字节数和最大字节数。对于消费者而言，它们分别对应于 Consumer 端参数 fetch.min.bytes 和 fetch.max.bytes 值；对于 Follower 副本而言，
+     *   它们分别对应于 Broker 端参数 replica.fetch.min.bytes 和 replica.fetch.max.bytes 值。
+     */
     public final int minBytes;
     public final int maxBytes;
     public final FetchIsolation isolation;
@@ -52,6 +59,10 @@ public class FetchParams {
         this.clientMetadata = clientMetadata;
     }
 
+    /**
+     * 判断该读取请求是否来自于Follower副本或Consumer
+     * @return
+     */
     public boolean isFromFollower() {
         return FetchRequest.isValidBrokerId(replicaId);
     }
